@@ -15,6 +15,7 @@
 cmake_minimum_required(VERSION 2.8.12)  # Ships with Ubuntu 14.04 (Trusty)
 
 project(cartographer_ros)
+include ("../../cmake_modules/CMakeOpt.cmake")
 
 set(PACKAGE_DEPENDENCIES
   cartographer_ros_msgs
@@ -134,17 +135,17 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
 if (CATKIN_ENABLE_TESTING)
   foreach(TEST_SOURCE_FILENAME ${ALL_TESTS})
     get_filename_component(TEST_NAME ${TEST_SOURCE_FILENAME} NAME_WE)
-    catkin_add_gtest(${TEST_NAME} ${TEST_SOURCE_FILENAME})
+	#catkin_add_gtest(${TEST_NAME} ${TEST_SOURCE_FILENAME})
     # catkin_add_gtest uses a plain (i.e. no PUBLIC/PRIVATE/INTERFACE) call to
     # target_link_libraries. That forces us to do the same.
-    target_include_directories(${TEST_NAME} SYSTEM PUBLIC ${LUA_INCLUDE_DIR})
-    target_link_libraries(${TEST_NAME} ${LUA_LIBRARIES})
-    target_include_directories(${TEST_NAME} SYSTEM PUBLIC ${catkin_INCLUDE_DIRS})
-    target_link_libraries(${TEST_NAME} ${catkin_LIBRARIES})
-    add_dependencies(${TEST_NAME} ${catkin_EXPORTED_TARGETS})
-    target_link_libraries(${TEST_NAME} cartographer)
-    target_link_libraries(${TEST_NAME} ${PROJECT_NAME})
-    set_target_properties(${TEST_NAME} PROPERTIES COMPILE_FLAGS ${TARGET_COMPILE_FLAGS})
+	#target_include_directories(${TEST_NAME} SYSTEM PUBLIC ${LUA_INCLUDE_DIR})
+	#target_link_libraries(${TEST_NAME} ${LUA_LIBRARIES})
+	#target_include_directories(${TEST_NAME} SYSTEM PUBLIC ${catkin_INCLUDE_DIRS})
+	#target_link_libraries(${TEST_NAME} ${catkin_LIBRARIES})
+	#add_dependencies(${TEST_NAME} ${catkin_EXPORTED_TARGETS})
+	#target_link_libraries(${TEST_NAME} cartographer)
+	#target_link_libraries(${TEST_NAME} ${PROJECT_NAME})
+	#set_target_properties(${TEST_NAME} PROPERTIES COMPILE_FLAGS ${TARGET_COMPILE_FLAGS})
   endforeach()
 endif()
 
