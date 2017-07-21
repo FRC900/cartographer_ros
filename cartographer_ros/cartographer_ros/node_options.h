@@ -21,7 +21,6 @@
 
 #include "cartographer/common/lua_parameter_dictionary.h"
 #include "cartographer/mapping/map_builder.h"
-#include "cartographer_ros/trajectory_options.h"
 
 namespace cartographer_ros {
 
@@ -32,6 +31,7 @@ struct NodeOptions {
   double lookup_transform_timeout_sec;
   double submap_publish_period_sec;
   double pose_publish_period_sec;
+  double trajectory_publish_period_sec;
 };
 
 NodeOptions CreateNodeOptions(

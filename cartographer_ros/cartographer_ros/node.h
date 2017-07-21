@@ -18,10 +18,13 @@
 #define CARTOGRAPHER_ROS_NODE_H_
 
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "cartographer/common/mutex.h"
 #include "cartographer_ros/map_builder_bridge.h"
+#include "cartographer_ros/node_constants.h"
 #include "cartographer_ros/node_options.h"
 #include "cartographer_ros/trajectory_options.h"
 #include "cartographer_ros_msgs/FinishTrajectory.h"
@@ -31,26 +34,11 @@
 #include "cartographer_ros_msgs/SubmapList.h"
 #include "cartographer_ros_msgs/SubmapQuery.h"
 #include "cartographer_ros_msgs/TrajectoryOptions.h"
-#include "cartographer_ros_msgs/TrajectorySubmapList.h"
 #include "cartographer_ros_msgs/WriteAssets.h"
 #include "ros/ros.h"
 #include "tf2_ros/transform_broadcaster.h"
 
 namespace cartographer_ros {
-
-// Default topic names; expected to be remapped as needed.
-constexpr char kLaserScanTopic[] = "scan";
-constexpr char kMultiEchoLaserScanTopic[] = "echoes";
-constexpr char kPointCloud2Topic[] = "points2";
-constexpr char kImuTopic[] = "imu";
-constexpr char kOdometryTopic[] = "odom";
-constexpr char kFinishTrajectoryServiceName[] = "finish_trajectory";
-constexpr char kOccupancyGridTopic[] = "map";
-constexpr char kScanMatchedPointCloudTopic[] = "scan_matched_points2";
-constexpr char kSubmapListTopic[] = "submap_list";
-constexpr char kSubmapQueryServiceName[] = "submap_query";
-constexpr char kStartTrajectoryServiceName[] = "start_trajectory";
-constexpr char kWriteAssetsServiceName[] = "write_assets";
 
 // Wires up ROS topics to SLAM.
 class Node {
@@ -66,6 +54,9 @@ class Node {
 
   // Starts the first trajectory with the default topics.
   void StartTrajectoryWithDefaultTopics(const TrajectoryOptions& options);
+
+  // Loads a persisted state to use as a map.
+  void LoadMap(const std::string& map_filename);
 
   ::ros::NodeHandle* node_handle();
   MapBuilderBridge* map_builder_bridge();
@@ -83,6 +74,10 @@ class Node {
   bool HandleWriteAssets(
       cartographer_ros_msgs::WriteAssets::Request& request,
       cartographer_ros_msgs::WriteAssets::Response& response);
+  // Returns the set of topic names we want to subscribe to.
+  std::unordered_set<string> ComputeExpectedTopics(
+      const TrajectoryOptions& options,
+      const cartographer_ros_msgs::SensorTopics& topics);
   int AddTrajectory(const TrajectoryOptions& options,
                     const cartographer_ros_msgs::SensorTopics& topics);
   void LaunchSubscribers(const TrajectoryOptions& options,
@@ -90,10 +85,12 @@ class Node {
                          int trajectory_id);
   void PublishSubmapList(const ::ros::WallTimerEvent& timer_event);
   void PublishTrajectoryStates(const ::ros::WallTimerEvent& timer_event);
+  void PublishTrajectoryNodeList(const ::ros::WallTimerEvent& timer_event);
+  void PublishConstraintList(const ::ros::WallTimerEvent& timer_event);
   void SpinOccupancyGridThreadForever();
   bool ValidateTrajectoryOptions(const TrajectoryOptions& options);
-  bool ValidateTopicName(const ::cartographer_ros_msgs::SensorTopics& topics,
-                         const TrajectoryOptions& options);
+  bool ValidateTopicNames(const ::cartographer_ros_msgs::SensorTopics& topics,
+                          const TrajectoryOptions& options);
 
   const NodeOptions node_options_;
 
@@ -104,6 +101,8 @@ class Node {
 
   ::ros::NodeHandle node_handle_;
   ::ros::Publisher submap_list_publisher_;
+  ::ros::Publisher trajectory_node_list_publisher_;
+  ::ros::Publisher constraint_list_publisher_;
   // These ros::ServiceServers need to live for the lifetime of the node.
   std::vector<::ros::ServiceServer> service_servers_;
   ::ros::Publisher scan_matched_point_cloud_publisher_;
@@ -111,12 +110,8 @@ class Node {
       cartographer::common::Time::min();
 
   // These are keyed with 'trajectory_id'.
-  std::unordered_map<int, ::ros::Subscriber> laser_scan_subscribers_;
-  std::unordered_map<int, ::ros::Subscriber> multi_echo_laser_scan_subscribers_;
-  std::unordered_map<int, ::ros::Subscriber> odom_subscribers_;
-  std::unordered_map<int, ::ros::Subscriber> imu_subscribers_;
-  std::unordered_map<int, std::vector<::ros::Subscriber>>
-      point_cloud_subscribers_;
+  std::unordered_map<int, std::vector<::ros::Subscriber>> subscribers_;
+  std::unordered_set<std::string> subscribed_topics_;
   std::unordered_map<int, bool> is_active_trajectory_ GUARDED_BY(mutex_);
   ::ros::Publisher occupancy_grid_publisher_;
   std::thread occupancy_grid_thread_;

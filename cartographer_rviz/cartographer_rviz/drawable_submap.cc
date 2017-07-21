@@ -27,6 +27,7 @@
 #include "OgreImage.h"
 #include "cartographer/common/make_unique.h"
 #include "cartographer/common/port.h"
+#include "cartographer_ros/msg_conversion.h"
 #include "cartographer_ros_msgs/SubmapQuery.h"
 #include "eigen_conversions/eigen_msg.h"
 #include "ros/ros.h"
@@ -47,30 +48,42 @@ constexpr double kFadeOutStartDistanceInMeters = 1.;
 constexpr double kFadeOutDistanceInMeters = 2.;
 constexpr float kAlphaUpdateThreshold = 0.2f;
 
-std::string GetSubmapIdentifier(const int trajectory_id,
-                                const int submap_index) {
-  return std::to_string(trajectory_id) + "-" + std::to_string(submap_index);
+std::string GetSubmapIdentifier(
+    const ::cartographer::mapping::SubmapId& submap_id) {
+  return std::to_string(submap_id.trajectory_id) + "-" +
+         std::to_string(submap_id.submap_index);
+}
+
+Ogre::Vector3 ToOgre(const Eigen::Vector3d& v) {
+  return Ogre::Vector3(v.x(), v.y(), v.z());
+}
+
+Ogre::Quaternion ToOgre(const Eigen::Quaterniond& q) {
+  return Ogre::Quaternion(q.w(), q.x(), q.y(), q.z());
 }
 
 }  // namespace
 
-DrawableSubmap::DrawableSubmap(const int trajectory_id, const int submap_index,
-                               Ogre::SceneManager* const scene_manager,
-                               ::rviz::Property* submap_category,
-                               const bool visible)
-    : trajectory_id_(trajectory_id),
-      submap_index_(submap_index),
-      scene_manager_(scene_manager),
-      scene_node_(scene_manager->getRootSceneNode()->createChildSceneNode()),
-      manual_object_(scene_manager->createManualObject(
-          kManualObjectPrefix +
-          GetSubmapIdentifier(trajectory_id, submap_index))),
+DrawableSubmap::DrawableSubmap(const ::cartographer::mapping::SubmapId& id,
+                               ::rviz::DisplayContext* const display_context,
+                               ::rviz::Property* const submap_category,
+                               const bool visible, const float pose_axes_length,
+                               const float pose_axes_radius)
+    : id_(id),
+      display_context_(display_context),
+      scene_node_(display_context->getSceneManager()
+                      ->getRootSceneNode()
+                      ->createChildSceneNode()),
+      submap_node_(scene_node_->createChildSceneNode()),
+      manual_object_(display_context->getSceneManager()->createManualObject(
+          kManualObjectPrefix + GetSubmapIdentifier(id))),
+      pose_axes_(display_context->getSceneManager(), scene_node_,
+                 pose_axes_length, pose_axes_radius),
       last_query_timestamp_(0) {
   material_ = Ogre::MaterialManager::getSingleton().getByName(
       kSubmapSourceMaterialName);
   material_ =
-      material_->clone(kSubmapMaterialPrefix +
-                       GetSubmapIdentifier(trajectory_id_, submap_index));
+      material_->clone(kSubmapMaterialPrefix + GetSubmapIdentifier(id_));
   material_->setReceiveShadows(false);
   material_->getTechnique(0)->setLightingEnabled(false);
   material_->setCullingMode(Ogre::CULL_NONE);
@@ -83,13 +96,14 @@ DrawableSubmap::DrawableSubmap(const int trajectory_id, const int submap_index,
   visibility_ = ::cartographer::common::make_unique<::rviz::BoolProperty>(
       "" /* title */, visible, "" /* description */, submap_category,
       SLOT(ToggleVisibility()), this);
-  if (visible) {
-    scene_node_->attachObject(manual_object_);
-  }
+  submap_node_->attachObject(manual_object_);
+  scene_node_->setVisible(visible);
   connect(this, SIGNAL(RequestSucceeded()), this, SLOT(UpdateSceneNode()));
 }
 
 DrawableSubmap::~DrawableSubmap() {
+  // 'query_in_progress_' must be true until the Q_EMIT has happened. Qt then
+  // makes sure that 'RequestSucceeded' is not called after our destruction.
   if (QueryInProgress()) {
     rpc_request_future_.wait();
   }
@@ -98,8 +112,9 @@ DrawableSubmap::~DrawableSubmap() {
     Ogre::TextureManager::getSingleton().remove(texture_->getHandle());
     texture_.setNull();
   }
-  scene_manager_->destroySceneNode(scene_node_);
-  scene_manager_->destroyManualObject(manual_object_);
+  display_context_->getSceneManager()->destroySceneNode(submap_node_);
+  display_context_->getSceneManager()->destroySceneNode(scene_node_);
+  display_context_->getSceneManager()->destroyManualObject(manual_object_);
 }
 
 void DrawableSubmap::Update(
@@ -113,29 +128,29 @@ void DrawableSubmap::Update(
     return;
   }
   ::cartographer::common::MutexLocker locker(&mutex_);
-  position_ = position;
-  orientation_ = orientation;
-  submap_z_ = metadata.pose.position.z;
   metadata_version_ = metadata.submap_version;
-  if (texture_version_ != -1) {
+  pose_ = ::cartographer_ros::ToRigid3d(metadata.pose);
+  if (submap_texture_ != nullptr) {
     // We have to update the transform since we are already displaying a texture
     // for this submap.
     UpdateTransform();
   }
   visibility_->setName(
-      QString("%1.%2").arg(submap_index_).arg(metadata_version_));
+      QString("%1.%2").arg(id_.submap_index).arg(metadata_version_));
   visibility_->setDescription(
       QString("Toggle visibility of this individual submap.<br><br>"
               "Trajectory %1, submap %2, submap version %3")
-          .arg(trajectory_id_)
-          .arg(submap_index_)
+          .arg(id_.trajectory_id)
+          .arg(id_.submap_index)
           .arg(metadata_version_));
 }
 
 bool DrawableSubmap::MaybeFetchTexture(ros::ServiceClient* const client) {
   ::cartographer::common::MutexLocker locker(&mutex_);
-  // Received metadata version can also be lower - if we restarted Cartographer
-  const bool newer_version_available = texture_version_ != metadata_version_;
+  // Received metadata version can also be lower if we restarted Cartographer.
+  const bool newer_version_available =
+      submap_texture_ == nullptr ||
+      submap_texture_->version != metadata_version_;
   const std::chrono::milliseconds now =
       std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::system_clock::now().time_since_epoch());
@@ -147,18 +162,16 @@ bool DrawableSubmap::MaybeFetchTexture(ros::ServiceClient* const client) {
   query_in_progress_ = true;
   last_query_timestamp_ = now;
   rpc_request_future_ = std::async(std::launch::async, [this, client]() {
-    ::cartographer_ros_msgs::SubmapQuery srv;
-    srv.request.trajectory_id = trajectory_id_;
-    srv.request.submap_index = submap_index_;
-    if (client->call(srv)) {
+    std::unique_ptr<::cartographer_ros::SubmapTexture> submap_texture =
+        ::cartographer_ros::FetchSubmapTexture(id_, client);
+    ::cartographer::common::MutexLocker locker(&mutex_);
+    query_in_progress_ = false;
+    if (submap_texture != nullptr) {
       // We emit a signal to update in the right thread, and pass via the
-      // 'response_' member to simplify the signal-slot connection slightly.
-      ::cartographer::common::MutexLocker locker(&mutex_);
-      response_ = srv.response;
+      // 'submap_texture_' member to simplify the signal-slot connection
+      // slightly.
+      submap_texture_ = std::move(submap_texture);
       Q_EMIT RequestSucceeded();
-    } else {
-      ::cartographer::common::MutexLocker locker(&mutex_);
-      query_in_progress_ = false;
     }
   });
   return true;
@@ -170,7 +183,8 @@ bool DrawableSubmap::QueryInProgress() {
 }
 
 void DrawableSubmap::SetAlpha(const double current_tracking_z) {
-  const double distance_z = std::abs(submap_z_ - current_tracking_z);
+  const double distance_z =
+      std::abs(pose_.translation().z() - current_tracking_z);
   const double fade_distance =
       std::max(distance_z - kFadeOutStartDistanceInMeters, 0.);
   const float alpha = static_cast<float>(
@@ -183,29 +197,21 @@ void DrawableSubmap::SetAlpha(const double current_tracking_z) {
 
 void DrawableSubmap::UpdateSceneNode() {
   ::cartographer::common::MutexLocker locker(&mutex_);
-  texture_version_ = response_.submap_version;
-  std::string compressed_cells(response_.cells.begin(), response_.cells.end());
-  std::string cells;
-  ::cartographer::common::FastGunzipString(compressed_cells, &cells);
-  tf::poseMsgToEigen(response_.slice_pose, slice_pose_);
   UpdateTransform();
-  query_in_progress_ = false;
   // The call to Ogre's loadRawData below does not work with an RG texture,
   // therefore we create an RGB one whose blue channel is always 0.
   std::vector<char> rgb;
-  for (int i = 0; i < response_.height; ++i) {
-    for (int j = 0; j < response_.width; ++j) {
-      auto r = cells[(i * response_.width + j) * 2];
-      auto g = cells[(i * response_.width + j) * 2 + 1];
-      rgb.push_back(r);
-      rgb.push_back(g);
-      rgb.push_back(0.);
-    }
+  for (size_t i = 0; i < submap_texture_->intensity.size(); ++i) {
+    rgb.push_back(submap_texture_->intensity[i]);
+    rgb.push_back(submap_texture_->alpha[i]);
+    rgb.push_back(0.);
   }
 
   manual_object_->clear();
-  const float metric_width = response_.resolution * response_.width;
-  const float metric_height = response_.resolution * response_.height;
+  const float metric_width =
+      submap_texture_->resolution * submap_texture_->width;
+  const float metric_height =
+      submap_texture_->resolution * submap_texture_->height;
   manual_object_->begin(material_->getName(),
                         Ogre::RenderOperation::OT_TRIANGLE_STRIP);
   // Bottom left
@@ -230,11 +236,11 @@ void DrawableSubmap::UpdateSceneNode() {
     texture_.setNull();
   }
   const std::string texture_name =
-      kSubmapTexturePrefix + GetSubmapIdentifier(trajectory_id_, submap_index_);
+      kSubmapTexturePrefix + GetSubmapIdentifier(id_);
   texture_ = Ogre::TextureManager::getSingleton().loadRawData(
       texture_name, Ogre::ResourceGroupManager::DEFAULT_RESOURCE_GROUP_NAME,
-      pixel_stream, response_.width, response_.height, Ogre::PF_BYTE_RGB,
-      Ogre::TEX_TYPE_2D, 0);
+      pixel_stream, submap_texture_->width, submap_texture_->height,
+      Ogre::PF_BYTE_RGB, Ogre::TEX_TYPE_2D, 0);
 
   Ogre::Pass* const pass = material_->getTechnique(0)->getPass(0);
   pass->setSceneBlending(Ogre::SBF_ONE, Ogre::SBF_ONE_MINUS_SOURCE_ALPHA);
@@ -247,14 +253,14 @@ void DrawableSubmap::UpdateSceneNode() {
 }
 
 void DrawableSubmap::UpdateTransform() {
-  const Eigen::Quaterniond quaternion(slice_pose_.rotation());
-  const Ogre::Quaternion slice_rotation(quaternion.w(), quaternion.x(),
-                                        quaternion.y(), quaternion.z());
-  const Ogre::Vector3 slice_translation(slice_pose_.translation().x(),
-                                        slice_pose_.translation().y(),
-                                        slice_pose_.translation().z());
-  scene_node_->setPosition(orientation_ * slice_translation + position_);
-  scene_node_->setOrientation(orientation_ * slice_rotation);
+  CHECK(submap_texture_ != nullptr);
+  const ::cartographer::transform::Rigid3d pose =
+      pose_ * submap_texture_->slice_pose;
+  submap_node_->setPosition(ToOgre(pose.translation()));
+  submap_node_->setOrientation(ToOgre(pose.rotation()));
+  pose_axes_.setPosition(ToOgre(pose_.translation()));
+  pose_axes_.setOrientation(ToOgre(pose_.rotation()));
+  display_context_->queueRender();
 }
 
 float DrawableSubmap::UpdateAlpha(const float target_alpha) {
@@ -266,15 +272,7 @@ float DrawableSubmap::UpdateAlpha(const float target_alpha) {
 }
 
 void DrawableSubmap::ToggleVisibility() {
-  if (visibility_->getBool()) {
-    if (scene_node_->numAttachedObjects() == 0) {
-      scene_node_->attachObject(manual_object_);
-    }
-  } else {
-    if (scene_node_->numAttachedObjects() > 0) {
-      scene_node_->detachObject(manual_object_);
-    }
-  }
+  scene_node_->setVisible(visibility_->getBool());
 }
 
 }  // namespace cartographer_rviz

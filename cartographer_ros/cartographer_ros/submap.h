@@ -14,18 +14,34 @@
  * limitations under the License.
  */
 
-#ifndef CARTOGRAPHER_ROS_TIME_CONVERSION_H_
-#define CARTOGRAPHER_ROS_TIME_CONVERSION_H_
+#ifndef CARTOGRAPHER_ROS_SUBMAP_H_
+#define CARTOGRAPHER_ROS_SUBMAP_H_
 
-#include "cartographer/common/time.h"
+#include <memory>
+#include <vector>
+
+#include "cartographer/mapping/id.h"
+#include "cartographer/transform/rigid_transform.h"
 #include "ros/ros.h"
 
 namespace cartographer_ros {
 
-::ros::Time ToRos(::cartographer::common::Time time);
+struct SubmapTexture {
+  int version;
+  std::vector<char> intensity;
+  std::vector<char> alpha;
+  int width;
+  int height;
+  double resolution;
+  ::cartographer::transform::Rigid3d slice_pose;
+};
 
-::cartographer::common::Time FromRos(const ::ros::Time& time);
+// Fetch 'submap_id' using the 'client' and returning the response or 'nullptr'
+// on error.
+std::unique_ptr<SubmapTexture> FetchSubmapTexture(
+    const ::cartographer::mapping::SubmapId& submap_id,
+    ros::ServiceClient* client);
 
 }  // namespace cartographer_ros
 
-#endif  // CARTOGRAPHER_ROS_TIME_CONVERSION_H_
+#endif  // CARTOGRAPHER_ROS_SUBMAP_H_
