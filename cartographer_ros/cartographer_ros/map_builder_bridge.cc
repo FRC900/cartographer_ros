@@ -16,16 +16,27 @@
 
 #include "cartographer_ros/map_builder_bridge.h"
 
+#include "cartographer/io/color.h"
 #include "cartographer/io/proto_stream.h"
-#include "cartographer_ros/assets_writer.h"
-#include "cartographer_ros/color.h"
 #include "cartographer_ros/msg_conversion.h"
-#include "cartographer_ros/occupancy_grid.h"
 
 namespace cartographer_ros {
 
+namespace {
+
 constexpr double kTrajectoryLineStripMarkerScale = 0.07;
 constexpr double kConstraintMarkerScale = 0.025;
+
+::std_msgs::ColorRGBA ToMessage(const cartographer::io::FloatColor& color) {
+  ::std_msgs::ColorRGBA result;
+  result.r = color[0];
+  result.g = color[1];
+  result.b = color[2];
+  result.a = 1.f;
+  return result;
+}
+
+}  // namespace
 
 MapBuilderBridge::MapBuilderBridge(const NodeOptions& node_options,
                                    tf2_ros::Buffer* const tf_buffer)
@@ -70,42 +81,10 @@ void MapBuilderBridge::FinishTrajectory(const int trajectory_id) {
   sensor_bridges_.erase(trajectory_id);
 }
 
-void MapBuilderBridge::SerializeState(const std::string& stem) {
-  cartographer::io::ProtoStreamWriter writer(stem + ".pbstream");
+void MapBuilderBridge::SerializeState(const std::string& filename) {
+  cartographer::io::ProtoStreamWriter writer(filename);
   map_builder_.SerializeState(&writer);
   CHECK(writer.Close()) << "Could not write state.";
-}
-
-void MapBuilderBridge::WriteAssets(const string& stem) {
-  const auto all_trajectory_nodes =
-      map_builder_.sparse_pose_graph()->GetTrajectoryNodes();
-  if (!HasNonTrimmedNode(all_trajectory_nodes)) {
-    LOG(WARNING) << "No data was collected and no assets will be written.";
-    return;
-  }
-  // Make sure there is a trajectory with id = 0.
-  CHECK_EQ(trajectory_options_.count(0), 1);
-  LOG(INFO) << "Writing assets with stem '" << stem << "'...";
-  if (node_options_.map_builder_options.use_trajectory_builder_2d()) {
-    // We arbitrarily use the submap_options() from the first trajectory to
-    // write the 2D assets.
-    Write2DAssets(
-        all_trajectory_nodes, node_options_.map_frame,
-        trajectory_options_[0]
-            .trajectory_builder_options.trajectory_builder_2d_options()
-            .submaps_options(),
-        stem);
-  }
-
-  if (node_options_.map_builder_options.use_trajectory_builder_3d()) {
-    Write3DAssets(
-        all_trajectory_nodes,
-        trajectory_options_[0]
-            .trajectory_builder_options.trajectory_builder_3d_options()
-            .submaps_options()
-            .high_resolution(),
-        stem);
-  }
 }
 
 bool MapBuilderBridge::HandleSubmapQuery(
@@ -157,28 +136,6 @@ cartographer_ros_msgs::SubmapList MapBuilderBridge::GetSubmapList() {
   return submap_list;
 }
 
-std::unique_ptr<nav_msgs::OccupancyGrid>
-MapBuilderBridge::BuildOccupancyGrid() {
-  CHECK(node_options_.map_builder_options.use_trajectory_builder_2d())
-      << "Publishing OccupancyGrids for 3D data is not yet supported.";
-  const auto all_trajectory_nodes =
-      map_builder_.sparse_pose_graph()->GetTrajectoryNodes();
-  std::unique_ptr<nav_msgs::OccupancyGrid> occupancy_grid;
-  if (HasNonTrimmedNode(all_trajectory_nodes)) {
-    occupancy_grid =
-        cartographer::common::make_unique<nav_msgs::OccupancyGrid>();
-    // Make sure there is a trajectory with id = 0.
-    CHECK_EQ(trajectory_options_.count(0), 1);
-    BuildOccupancyGrid2D(
-        all_trajectory_nodes, node_options_.map_frame,
-        trajectory_options_[0]
-            .trajectory_builder_options.trajectory_builder_2d_options()
-            .submaps_options(),
-        occupancy_grid.get());
-  }
-  return occupancy_grid;
-}
-
 std::unordered_map<int, MapBuilderBridge::TrajectoryState>
 MapBuilderBridge::GetTrajectoryStates() {
   std::unordered_map<int, TrajectoryState> trajectory_states;
@@ -212,17 +169,17 @@ visualization_msgs::MarkerArray MapBuilderBridge::GetTrajectoryNodeList() {
   visualization_msgs::MarkerArray trajectory_node_list;
   const auto all_trajectory_nodes =
       map_builder_.sparse_pose_graph()->GetTrajectoryNodes();
-  int marker_id = 0;
   for (int trajectory_id = 0;
        trajectory_id < static_cast<int>(all_trajectory_nodes.size());
        ++trajectory_id) {
     const auto& single_trajectory_nodes = all_trajectory_nodes[trajectory_id];
     visualization_msgs::Marker marker;
-    marker.id = marker_id++;
+    marker.ns = "Trajectory " + std::to_string(trajectory_id);
+    marker.id = 0;
     marker.type = visualization_msgs::Marker::LINE_STRIP;
     marker.header.stamp = ::ros::Time::now();
     marker.header.frame_id = node_options_.map_frame;
-    marker.color = GetColor(trajectory_id);
+    marker.color = ToMessage(cartographer::io::GetColor(trajectory_id));
     marker.scale.x = kTrajectoryLineStripMarkerScale;
     marker.pose.orientation.w = 1.0;
     marker.pose.position.z = 0.05;
@@ -241,7 +198,7 @@ visualization_msgs::MarkerArray MapBuilderBridge::GetTrajectoryNodeList() {
       // trajectory into multiple markers.
       if (marker.points.size() == 16384) {
         trajectory_node_list.markers.push_back(marker);
-        marker.id = marker_id++;
+        ++marker.id;
         marker.points.clear();
         // Push back the last point, so the two markers appear connected.
         marker.points.push_back(node_point);
@@ -298,8 +255,9 @@ visualization_msgs::MarkerArray MapBuilderBridge::GetConstraintList() {
       // Color mapping for submaps of various trajectories - add trajectory id
       // to ensure different starting colors. Also add a fixed offset of 25
       // to avoid having identical colors as trajectories.
-      color_constraint = GetColor(constraint.submap_id.submap_index +
-                                  constraint.submap_id.trajectory_id + 25);
+      color_constraint = ToMessage(
+          cartographer::io::GetColor(constraint.submap_id.submap_index +
+                                     constraint.submap_id.trajectory_id + 25));
       color_residual.a = 1.0;
       color_residual.r = 1.0;
     } else {
@@ -330,7 +288,7 @@ visualization_msgs::MarkerArray MapBuilderBridge::GetConstraintList() {
                                 .pose;
     // Similar to GetTrajectoryNodeList(), we can skip multiplying with
     // node.constant_data->tracking_to_pose.
-    const ::cartographer::transform::Rigid3d constraint_pose =
+    const cartographer::transform::Rigid3d constraint_pose =
         submap_pose * constraint.pose.zbar_ij;
 
     constraint_marker->points.push_back(
