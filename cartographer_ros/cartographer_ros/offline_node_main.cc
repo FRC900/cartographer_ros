@@ -14,6 +14,10 @@
  * limitations under the License.
  */
 
+#include <errno.h>
+#include <string.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 #include <time.h>
 #include <chrono>
 #include <sstream>
@@ -209,15 +213,14 @@ void Run(const std::vector<string>& bag_filenames) {
     }
 
     bag.close();
-    // Ensure the clock is republished also during trajectory finalization,
-    // which might take a while.
-    clock_republish_timer.start();
     node.FinishTrajectory(trajectory_id);
-    clock_republish_timer.stop();
   }
 
-  // Republish the clock after bag processing has been completed.
+  // Ensure the clock is republished after the bag has been finished, during the
+  // final optimization, serialization, and optional indefinite spinning at the
+  // end.
   clock_republish_timer.start();
+  node.RunFinalOptimization();
 
   const std::chrono::time_point<std::chrono::steady_clock> end_time =
       std::chrono::steady_clock::now();
@@ -232,9 +235,16 @@ void Run(const std::vector<string>& bag_filenames) {
   clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu_timespec);
   LOG(INFO) << "Elapsed CPU time: "
             << (cpu_timespec.tv_sec + 1e-9 * cpu_timespec.tv_nsec) << " s";
+  rusage usage;
+  CHECK_EQ(getrusage(RUSAGE_SELF, &usage), 0) << strerror(errno);
+  LOG(INFO) << "Peak memory usage: " << usage.ru_maxrss << " KiB";
 #endif
 
-  node.SerializeState(bag_filenames.front() + ".pbstream");
+  if (::ros::ok()) {
+    const string output_filename = bag_filenames.front() + ".pbstream";
+    LOG(INFO) << "Writing state to '" << output_filename << "'...";
+    node.SerializeState(output_filename);
+  }
   if (FLAGS_keep_running) {
     ::ros::waitForShutdown();
   }

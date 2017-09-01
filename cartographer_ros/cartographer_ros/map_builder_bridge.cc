@@ -77,8 +77,12 @@ void MapBuilderBridge::FinishTrajectory(const int trajectory_id) {
   // Make sure there is a trajectory with 'trajectory_id'.
   CHECK_EQ(sensor_bridges_.count(trajectory_id), 1);
   map_builder_.FinishTrajectory(trajectory_id);
-  map_builder_.sparse_pose_graph()->RunFinalOptimization();
   sensor_bridges_.erase(trajectory_id);
+}
+
+void MapBuilderBridge::RunFinalOptimization() {
+  LOG(INFO) << "Running final trajectory optimization...";
+  map_builder_.sparse_pose_graph()->RunFinalOptimization();
 }
 
 void MapBuilderBridge::SerializeState(const std::string& filename) {
@@ -187,10 +191,6 @@ visualization_msgs::MarkerArray MapBuilderBridge::GetTrajectoryNodeList() {
       if (node.trimmed()) {
         continue;
       }
-      // In 2D, the pose in node.pose is xy-aligned. Multiplying by
-      // node.constant_data->tracking_to_pose would give the full orientation,
-      // but that is not needed here since we are only interested in the
-      // translational part.
       const ::geometry_msgs::Point node_point =
           ToGeometryMsgPoint(node.pose.translation());
       marker.points.push_back(node_point);
@@ -280,14 +280,10 @@ visualization_msgs::MarkerArray MapBuilderBridge::GetConstraintList() {
         all_submap_data[constraint.submap_id.trajectory_id]
                        [constraint.submap_id.submap_index];
     const auto& submap_pose = submap_data.pose;
-    // Similar to GetTrajectoryNodeList(), we can skip multiplying with
-    // node.constant_data->tracking_to_pose.
     const auto& trajectory_node_pose =
         all_trajectory_nodes[constraint.node_id.trajectory_id]
                             [constraint.node_id.node_index]
                                 .pose;
-    // Similar to GetTrajectoryNodeList(), we can skip multiplying with
-    // node.constant_data->tracking_to_pose.
     const cartographer::transform::Rigid3d constraint_pose =
         submap_pose * constraint.pose.zbar_ij;
 
